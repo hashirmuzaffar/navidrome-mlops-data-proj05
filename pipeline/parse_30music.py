@@ -6,7 +6,7 @@ import pandas as pd
 import chi
 
 CONTAINER = "navidrome-bucket-proj05"
-chi.use_site("CHI@TACC")
+chi.use_site("CHI@UC")
 chi.set("project_name", "CHI-251409")
 conn = chi.connection()
 

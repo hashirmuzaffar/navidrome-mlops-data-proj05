@@ -12,7 +12,7 @@ import chi
 
 # ── config ─────────────────────────────────────────────────────
 CONTAINER        = "navidrome-bucket-proj05"
-SITE             = "CHI@TACC"
+SITE             = "CHI@UC"
 PROJECT          = "CHI-251409"
 CHUNK_SIZE       = 50 * 1024 * 1024
 CHECKPOINT_FILE  = "/tmp/ingest_checkpoint.json"
