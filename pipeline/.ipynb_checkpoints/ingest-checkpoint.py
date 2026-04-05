@@ -4,8 +4,7 @@ Streams FMA metadata + FMA small directly to Swift in chunks.
 Run: python pipeline/ingest.py
 """
 
-import subprocess, os, json, hashlib, zipfile, io
-subprocess.run(["pip", "install", "pyarrow", "-q"], check=True)
+import os, json, hashlib, zipfile, io
 import requests
 import pandas as pd
 from datetime import datetime, timezone
@@ -16,7 +15,7 @@ CONTAINER        = "navidrome-bucket-proj05"
 SITE             = "CHI@UC"
 PROJECT          = "CHI-251409"
 CHUNK_SIZE       = 50 * 1024 * 1024
-CHECKPOINT_FILE  = "/home/hm3680_nyu_edu/work/logs/ingest_checkpoint.json"
+CHECKPOINT_FILE  = "/tmp/ingest_checkpoint.json"
 FMA_METADATA_URL = "https://os.unil.cloud.switch.ch/fma/fma_metadata.zip"
 FMA_SMALL_URL    = "https://os.unil.cloud.switch.ch/fma/fma_small.zip"
 RUN_ID           = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
