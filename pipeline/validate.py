@@ -84,7 +84,7 @@ def validate_fma_tracks():
     print("\n[1] Validating FMA tracks...")
     local = "/tmp/val_raw_tracks.parquet"
 
-    if not swift_download("processed/fma/fma_metadata/raw_tracks.parquet", local):
+    if not swift_download("processed/fma/fma_metadata/raw_tracks_clean.parquet", local):
         print("  not found, skipping")
         return None
 
