@@ -133,7 +133,7 @@ def validate_audio_features():
     local = "/tmp/val_embeddings.csv"
 
     if not swift_download(
-        "features/song-audio/v20260405/embeddings_audio_features.csv", local
+        "features/song-audio/v20260406/embeddings_audio_features.csv", local
     ):
         print("  not found, skipping")
         return None
