@@ -1,7 +1,6 @@
 """
-Navidrome - Batch Dataset Builder
-Compiles versioned train/eval datasets from production events + historical data.
-Production data intentionally differs from training data (real serving challenges).
+Navidrome - Session Dataset Builder (GRU4Rec + SessionKNN format)
+Reads sessions chunks from Swift, builds chronological train/eval splits.
 Run: source ~/.chi_auth.sh && python3 pipeline/build_dataset.py
 """
 import os, json, subprocess, io, ast
@@ -13,7 +12,6 @@ CONTAINER    = "navidrome-bucket-proj05"
 RUN_ID       = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 VERSION      = f"v{datetime.now(timezone.utc).strftime('%Y%m%d')}-001"
 HOLDOUT_FRAC = 0.15
-MAX_PER_USER = 50
 
 AUTH_ARGS = [
     "--os-auth-url", os.environ["OS_AUTH_URL"],
@@ -23,8 +21,7 @@ AUTH_ARGS = [
 ]
 
 def swift_run(args):
-    return subprocess.run(["swift"] + AUTH_ARGS + args,
-                         capture_output=True, text=True)
+    return subprocess.run(["swift"] + AUTH_ARGS + args, capture_output=True, text=True)
 
 def swift_upload(local, name):
     swift_run(["upload", "--object-name", name, CONTAINER, local])
@@ -44,228 +41,184 @@ def list_objects(prefix):
     r = swift_run(["list", CONTAINER, "--prefix", prefix])
     return [l.strip() for l in r.stdout.strip().split("\n") if l.strip()]
 
-# ══════════════════════════════════════════════════════════════
-# STEP 1 — Load 30Music playlist interactions (historical)
-# ══════════════════════════════════════════════════════════════
-def load_historical():
-    print("\n[STEP 1] Loading 30Music playlist interactions...")
-    local = "/tmp/playlists_val.parquet"
-    swift_download("validated/30music/playlists.parquet", local)
-    playlists = pd.read_parquet(local, engine="pyarrow")
-    os.remove(local)
-
-    rows = []
-    for _, row in playlists.iterrows():
-        try:
-            relations = row["relations"]
-            if isinstance(relations, str):
-                relations = ast.literal_eval(relations)
-            if not isinstance(relations, dict):
-                continue
-            subjects = relations.get("subjects", [])
-            objects  = relations.get("objects", [])
-            if not subjects or not objects:
-                continue
-            user_id = subjects[0].get("id")
-            ts = pd.to_datetime(row.get("timestamp", 0), unit="s", errors="coerce")
-            for obj in objects:
-                song_id = obj.get("id")
-                if user_id and song_id:
-                    rows.append({
-                        "user_id":   f"30m_{user_id}",
-                        "song_id":   str(song_id),
-                        "score":     1.5,
-                        "action":    "playlist_add",
-                        "timestamp": ts,
-                        "source":    "30music_historical"
-                    })
-        except Exception:
-            continue
-
-    df = pd.DataFrame(rows)
-    print(f"  historical interactions: {len(df):,}")
-    print(f"  unique users: {df['user_id'].nunique():,}")
-    return df
-
-# ══════════════════════════════════════════════════════════════
-# STEP 2 — Load production events (from data generator)
-# ══════════════════════════════════════════════════════════════
-def load_production():
-    print("\n[STEP 2] Loading production events from Swift...")
-    objects = list_objects("production/events/")
-    print(f"  found {len(objects)} production event files")
-
-    if not objects:
-        print("  no production events found — skipping")
+def load_sessions(max_chunks=5):
+    print("\n[STEP 1] Loading 30Music sessions...")
+    chunks = list_objects("processed/30music/chunks/sessions/")
+    print(f"  found {len(chunks)} session chunks")
+    if not chunks:
+        print("  sessions not ready yet")
         return pd.DataFrame()
-
+    chunks = chunks[:max_chunks]
     dfs = []
-    for obj in objects:
-        local = f"/tmp/prod_{len(dfs)}.parquet"
-        swift_download(obj, local)
+    for i, chunk in enumerate(chunks):
+        local = f"/tmp/sess_{i}.parquet"
+        swift_download(chunk, local)
         try:
             df = pd.read_parquet(local, engine="pyarrow")
             dfs.append(df)
         except Exception as e:
-            print(f"  skipping {obj}: {e}")
+            print(f"  skip: {e}")
         finally:
             if os.path.exists(local):
                 os.remove(local)
-
+        if (i+1) % 10 == 0:
+            print(f"  loaded {i+1}/{len(chunks)} chunks...")
     if not dfs:
         return pd.DataFrame()
+    sessions = pd.concat(dfs, ignore_index=True)
+    print(f"  sessions loaded: {len(sessions):,}")
+    print(f"  columns: {list(sessions.columns)}")
+    return sessions
 
-    prod = pd.concat(dfs, ignore_index=True)
-    prod["timestamp"] = pd.to_datetime(prod["timestamp"], errors="coerce")
-    prod["score"] = pd.to_numeric(prod["score"], errors="coerce")
+def parse_sessions(sessions_df):
+    print("\n[STEP 2] Parsing session sequences...")
+    import ast, json
 
-    # production data intentionally differs from training:
-    # includes cold-start users, skips, session dropouts
-    print(f"  production interactions: {len(prod):,}")
-    print(f"  unique users: {prod['user_id'].nunique():,}")
-    print(f"  action distribution:")
-    print(prod["action"].value_counts().to_string())
-    return prod
+    def extract_session(row):
+        try:
+            relations = row["relations"]
+            if isinstance(relations, str):
+                try:
+                    relations = json.loads(relations.replace("'", '"'))
+                except:
+                    relations = ast.literal_eval(relations)
+            if not isinstance(relations, dict):
+                return None
+            subjects = relations.get("subjects", [])
+            objects  = relations.get("objects", [])
+            if not subjects or not objects:
+                return None
+            user_id = None
+            for s in subjects:
+                if s.get("type") == "user":
+                    user_id = s.get("id")
+                    break
+            if user_id is None:
+                return None
+            track_ids   = []
+            play_ratios = []
+            for obj in objects:
+                if obj.get("type") == "track":
+                    tid = obj.get("id")
+                    if tid is not None:
+                        track_ids.append(tid)
+                        ratio = obj.get("playratio", 1.0)
+                        try:
+                            ratio = float(ratio) if ratio is not None else 1.0
+                        except:
+                            ratio = 1.0
+                        play_ratios.append(min(ratio, 2.0))
+            if len(track_ids) < 2:
+                return None
+            return {
+                "session_id":  str(row["id"]),
+                "user_id":     int(user_id),
+                "timestamp":   pd.to_datetime(row["timestamp"], unit="s", errors="coerce"),
+                "track_ids":   track_ids,
+                "play_ratios": play_ratios,
+                "session_len": len(track_ids),
+                "source":      "30music_sessions"
+            }
+        except Exception:
+            return None
 
-# ══════════════════════════════════════════════════════════════
-# STEP 3 — Combine + chronological split + generate triplets
-# ══════════════════════════════════════════════════════════════
-def build_triplets(historical_df, production_df):
-    print("\n[STEP 3] Building dataset with chronological split...")
+    print(f"  processing {len(sessions_df):,} sessions...", flush=True)
+    results = sessions_df.apply(extract_session, axis=1)
+    valid = [r for r in results if r is not None]
+    skipped = len(sessions_df) - len(valid)
+    df = pd.DataFrame(valid)
+    print(f"  parsed: {len(df):,} sessions, {skipped:,} skipped")
+    if len(df) > 0:
+        print(f"  avg session length: {df['session_len'].mean():.1f} tracks")
+        print(f"  unique users: {df['user_id'].nunique():,}")
+    return df
+
+def build_split(sessions_df):
+    print("\n[STEP 3] Building vocab and train/eval split...")
     np.random.seed(42)
-
-    # combine sources
-    if not production_df.empty:
-        all_data = pd.concat([historical_df, production_df], ignore_index=True)
-        print(f"  combined: {len(historical_df):,} historical + {len(production_df):,} production")
-    else:
-        all_data = historical_df.copy()
-        print(f"  using historical only: {len(all_data):,} interactions")
-
-    all_data["timestamp"] = pd.to_datetime(all_data["timestamp"], utc=True, errors="coerce")
-    all_data = all_data.sort_values("timestamp").reset_index(drop=True)
-
-    # user-level holdout — 15% reserved for eval only
-    all_users = all_data["user_id"].unique()
-    holdout = set(np.random.choice(
-        all_users, size=int(len(all_users) * HOLDOUT_FRAC), replace=False))
-
-    train_pool = all_data[~all_data["user_id"].isin(holdout)]
-    eval_pool  = all_data[all_data["user_id"].isin(holdout)]
-
-    # chronological split on train pool
+    all_tracks = []
+    for tids in sessions_df["track_ids"]:
+        all_tracks.extend(tids)
+    unique_tracks = sorted(set(all_tracks))
+    track2idx = {tid: i+1 for i, tid in enumerate(unique_tracks)}
+    idx2track = {i+1: tid for tid, i in track2idx.items()}
+    print(f"  vocab size: {len(track2idx):,} tracks")
+    sessions_df = sessions_df.copy()
+    sessions_df["item_idxs"] = sessions_df["track_ids"].apply(
+        lambda tids: [track2idx[t] for t in tids if t in track2idx])
+    sessions_df["timestamp"] = pd.to_datetime(sessions_df["timestamp"], utc=True, errors="coerce")
+    sessions_df = sessions_df.sort_values("timestamp").reset_index(drop=True)
+    all_users = sessions_df["user_id"].unique()
+    holdout = set(np.random.choice(all_users, size=int(len(all_users)*HOLDOUT_FRAC), replace=False))
+    train_pool = sessions_df[~sessions_df["user_id"].isin(holdout)]
+    eval_pool  = sessions_df[sessions_df["user_id"].isin(holdout)]
     cutoff_idx = int(len(train_pool) * 0.8)
-    if cutoff_idx < len(train_pool):
-        train_cutoff = train_pool.iloc[cutoff_idx]["timestamp"]
-        train_final  = train_pool[train_pool["timestamp"] <= train_cutoff]
-        val_extra    = train_pool[train_pool["timestamp"] > train_cutoff]
-        eval_combined = pd.concat([eval_pool, val_extra], ignore_index=True)
-    else:
-        train_final   = train_pool
-        eval_combined = eval_pool
-
+    train_cutoff = train_pool.iloc[cutoff_idx]["timestamp"]
+    train_final  = train_pool[train_pool["timestamp"] <= train_cutoff]
+    val_extra    = train_pool[train_pool["timestamp"] > train_cutoff]
+    eval_combined = pd.concat([eval_pool, val_extra], ignore_index=True)
     print(f"  train: {len(train_final):,} | eval: {len(eval_combined):,}")
     print(f"  holdout users: {len(holdout):,}")
+    return train_final, eval_combined, track2idx, idx2track
 
-    all_songs = all_data["song_id"].unique()
-
-    def make_triplets(data):
-        triplets = []
-        for user_id, group in data.groupby("user_id"):
-            pos = list(group[group["score"] > 0]["song_id"].unique())
-            pos_set = set(pos)
-            neg_pool = [s for s in np.random.choice(
-                all_songs, size=min(200, len(all_songs)), replace=False)
-                if s not in pos_set]
-            for p in pos[:MAX_PER_USER]:
-                if neg_pool:
-                    triplets.append({
-                        "user_id":     user_id,
-                        "pos_song_id": p,
-                        "neg_song_id": np.random.choice(neg_pool)
-                    })
-        return pd.DataFrame(triplets)
-
-    print("  generating train triplets...")
-    train_t = make_triplets(train_final)
-    print(f"  train triplets: {len(train_t):,}")
-
-    print("  generating eval triplets...")
-    eval_t = make_triplets(eval_combined)
-    print(f"  eval triplets: {len(eval_t):,}")
-
-    return train_t, eval_t, train_final, eval_combined
-
-# ══════════════════════════════════════════════════════════════
-# STEP 4 — Upload versioned dataset
-# ══════════════════════════════════════════════════════════════
-def upload_dataset(train_t, eval_t, train_df, eval_df, historical_df, production_df):
+def upload_dataset(train_df, eval_df, track2idx, idx2track):
     print(f"\n[STEP 4] Uploading dataset {VERSION}...")
     prefix = f"datasets/{VERSION}"
-
-    tmp = f"/tmp/train_{VERSION}.parquet"
-    train_t.to_parquet(tmp, index=False, engine="pyarrow")
-    swift_upload(tmp, f"{prefix}/train_triplets.parquet")
+    tmp = "/tmp/train_sessions.parquet"
+    train_df.to_parquet(tmp, index=False, engine="pyarrow")
+    swift_upload(tmp, f"{prefix}/train_sessions.parquet")
     os.remove(tmp)
-
-    tmp = f"/tmp/eval_{VERSION}.parquet"
-    eval_t.to_parquet(tmp, index=False, engine="pyarrow")
-    swift_upload(tmp, f"{prefix}/eval_triplets.parquet")
+    tmp = "/tmp/eval_sessions.parquet"
+    eval_df.to_parquet(tmp, index=False, engine="pyarrow")
+    swift_upload(tmp, f"{prefix}/eval_sessions.parquet")
     os.remove(tmp)
-
+    vocab = {
+        "track2idx": {str(k): v for k, v in track2idx.items()},
+        "idx2track": {str(k): v for k, v in idx2track.items()}
+    }
+    swift_upload_bytes(json.dumps(vocab).encode(), f"{prefix}/vocab.json")
     manifest = {
         "version_id":            VERSION,
         "run_id":                RUN_ID,
         "created_at":            datetime.now(timezone.utc).isoformat(),
+        "format":                "session_sequences",
+        "models":                ["GRU4Rec", "SessionKNN"],
         "leakage_check":         "chronological_strict_user_holdout",
         "holdout_user_fraction": HOLDOUT_FRAC,
-        "max_triplets_per_user": MAX_PER_USER,
-        "neg_sampling":          "random_from_non_interacted",
-        "sources": {
-            "historical": {
-                "name":         "30music_playlists",
-                "interactions": len(historical_df),
-                "users":        int(historical_df["user_id"].nunique()),
-                "note":         "Real Last.fm playlist data 2011-2014"
-            },
-            "production": {
-                "name":         "feedback_api_synthetic",
-                "interactions": len(production_df) if not production_df.empty else 0,
-                "users":        int(production_df["user_id"].nunique()) if not production_df.empty else 0,
-                "note":         "Synthetic traffic with cold-start users and session noise"
-            }
+        "vocab_size":            len(track2idx),
+        "train_sessions":        len(train_df),
+        "eval_sessions":         len(eval_df),
+        "train_users":           int(train_df["user_id"].nunique()),
+        "eval_users":            int(eval_df["user_id"].nunique()),
+        "avg_session_len":       float(train_df["session_len"].mean()),
+        "sources":               ["30music_sessions"],
+        "schema": {
+            "session_id":  "str",
+            "user_id":     "int",
+            "timestamp":   "datetime UTC",
+            "track_ids":   "list[int] raw 30Music track IDs",
+            "play_ratios": "list[float] per-track play ratio capped at 2.0",
+            "item_idxs":   "list[int] vocab-mapped 1-based indices"
         },
-        "train_interactions": len(train_df),
-        "eval_interactions":  len(eval_df),
-        "train_triplets":     len(train_t),
-        "eval_triplets":      len(eval_t),
-        "train_users":        int(train_df["user_id"].nunique()),
-        "eval_users":         int(eval_df["user_id"].nunique()),
         "candidate_selection": {
-            "positive": "playlist_add score > 0",
-            "negative": "random sample from non-interacted songs",
-            "rationale": "BPR requires implicit negative sampling"
+            "min_session_len": 2,
+            "rationale": "Sessions with fewer than 2 tracks excluded"
         }
     }
-
-    swift_upload_bytes(
-        json.dumps(manifest, indent=2).encode(),
-        f"{prefix}/manifest.json"
-    )
+    swift_upload_bytes(json.dumps(manifest, indent=2).encode(), f"{prefix}/manifest.json")
     return manifest
 
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    print(f"=== Navidrome Build Dataset | run {RUN_ID} ===")
-    print(f"Version: {VERSION}")
-
-    historical_df  = load_historical()
-    production_df  = load_production()
-    train_t, eval_t, train_df, eval_df = build_triplets(historical_df, production_df)
-    manifest = upload_dataset(train_t, eval_t, train_df, eval_df,
-                              historical_df, production_df)
-
-    print("\n=== BUILD DATASET COMPLETE ===")
+    print(f"=== Navidrome Session Dataset Builder | run {RUN_ID} ===")
+    sessions_raw = load_sessions(max_chunks=5)
+    if sessions_raw.empty:
+        print("No sessions yet. Check: tail -f ~/sessions_parse.log")
+        exit(1)
+    sessions_df = parse_sessions(sessions_raw)
+    if sessions_df.empty:
+        print("No valid sessions parsed.")
+        exit(1)
+    train_df, eval_df, track2idx, idx2track = build_split(sessions_df)
+    manifest = upload_dataset(train_df, eval_df, track2idx, idx2track)
+    print("\n=== SESSION DATASET COMPLETE ===")
     print(json.dumps(manifest, indent=2))
