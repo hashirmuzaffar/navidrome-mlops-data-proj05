@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: navidrome-data-pipeline
+  namespace: navidrome
+spec:
+  template:
+    spec:
+      containers:
+      - name: pipeline
+        image: navidrome/data-pipeline:latest
+        command: ["python3", "pipeline/ingest.py"]
+        env:
+        - name: OS_AUTH_URL
+          valueFrom:
+            secretKeyRef:
+              name: swift-credentials
+              key: os-auth-url
+        - name: OS_APPLICATION_CREDENTIAL_ID
+          valueFrom:
+            secretKeyRef:
+              name: swift-credentials
+              key: os-app-credential-id
+        - name: OS_APPLICATION_CREDENTIAL_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: swift-credentials
+              key: os-app-credential-secret
+      restartPolicy: OnFailure

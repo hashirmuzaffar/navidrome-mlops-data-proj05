@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: navidrome-feedback-api
+  namespace: navidrome
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feedback-api
+  template:
+    metadata:
+      labels:
+        app: feedback-api
+    spec:
+      containers:
+      - name: feedback-api
+        image: navidrome/feedback-api:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: OS_AUTH_URL
+          valueFrom:
+            secretKeyRef:
+              name: swift-credentials
+              key: os-auth-url
+        - name: OS_APPLICATION_CREDENTIAL_ID
+          valueFrom:
+            secretKeyRef:
+              name: swift-credentials
+              key: os-app-credential-id
+        - name: OS_APPLICATION_CREDENTIAL_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: swift-credentials
+              key: os-app-credential-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feedback-api-service
+  namespace: navidrome
+spec:
+  selector:
+    app: feedback-api
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP

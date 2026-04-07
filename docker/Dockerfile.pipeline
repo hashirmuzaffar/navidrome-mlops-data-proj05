@@ -1,0 +1,19 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    python3-swiftclient \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY pipeline/ ./pipeline/
+
+ENV OS_AUTH_URL=""
+ENV OS_AUTH_TYPE="v3applicationcredential"
+ENV OS_APPLICATION_CREDENTIAL_ID=""
+ENV OS_APPLICATION_CREDENTIAL_SECRET=""
+
+CMD ["python3", "pipeline/ingest.py"]

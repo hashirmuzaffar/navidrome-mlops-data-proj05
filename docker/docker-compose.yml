@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  pipeline:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.pipeline
+    environment:
+      - OS_AUTH_URL=${OS_AUTH_URL}
+      - OS_AUTH_TYPE=v3applicationcredential
+      - OS_APPLICATION_CREDENTIAL_ID=${OS_APPLICATION_CREDENTIAL_ID}
+      - OS_APPLICATION_CREDENTIAL_SECRET=${OS_APPLICATION_CREDENTIAL_SECRET}
+    volumes:
+      - /tmp:/tmp
+    command: ["python3", "pipeline/ingest.py"]
+
+  feedback-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - OS_AUTH_URL=${OS_AUTH_URL}
+      - OS_AUTH_TYPE=v3applicationcredential
+      - OS_APPLICATION_CREDENTIAL_ID=${OS_APPLICATION_CREDENTIAL_ID}
+      - OS_APPLICATION_CREDENTIAL_SECRET=${OS_APPLICATION_CREDENTIAL_SECRET}
+    restart: unless-stopped
