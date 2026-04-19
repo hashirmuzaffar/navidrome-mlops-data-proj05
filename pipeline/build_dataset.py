@@ -19,7 +19,7 @@ CONTAINER            = "navidrome-bucket-proj05"
 RUN_ID               = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 VERSION              = f"v{datetime.now(timezone.utc).strftime('%Y%m%d')}-001"
 HOLDOUT_FRAC         = 0.15
-MAX_CHUNKS           = 5
+MAX_CHUNKS           = 28
 SKIP_RATIO_THRESHOLD = 0.25
 
 AUTH_ARGS = [
